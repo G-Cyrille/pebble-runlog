@@ -45,6 +45,7 @@ def build(ctx):
             'src/c/hintbar.c',
             'src/c/settings.c',
             'src/c/split_alert.c',
+            'src/c/start_gate.c',
             'src/c/summary.c',
         ], target=app_elf, bin_type='app')
 

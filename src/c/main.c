@@ -35,6 +35,8 @@
 #define JOURNAL_HIKE_S       60
 #define TARGET_ALERT_HOLD_S  20
 #define TARGET_ALERT_GAP_S  120
+#define TRACK_ALERT_HOLD_S   30   // ignore brief GPS/Bluetooth drops (bridges, pockets)
+#define TRACK_ALERT_GAP_S   120   // a flapping link vibrates at most every two minutes
 #define LINK_RETRY_MIN_MS  1400
 #define LINK_RETRY_MAX_MS 30000
 #define REFRESH_TAP_GAP_MS     2500  // debounce deliberate screen taps
@@ -57,6 +59,7 @@ typedef enum {
 #include "runlog.h"
 #include "hintbar.h"
 #include "split_alert.h"
+#include "start_gate.h"
 
 // Define g_set with sensible defaults.  Kilometres and auto-pause
 // enabled mirrors the defaults used on the phone side.  Splits
@@ -175,6 +178,15 @@ static bool s_queued_had_journal = false;
 // can otherwise become one of the watch's largest battery costs on a long hike.
 static bool s_phone_connected = false;
 static uint32_t s_link_retry_ms = LINK_RETRY_MIN_MS;
+// Bluetooth alone does not prove the phone app can record GPS: it must also
+// have answered since the last connection edge.
+static bool s_companion_ready = false;
+
+// Route-at-risk alert: GPS or phone missing while recording. Never stops the run.
+static AppTimer *s_track_alert_timer = NULL;
+static time_t s_track_alert_last = 0;
+static bool s_track_alert_sent = false;    // one alert per outage
+static bool s_track_alert_muted = false;   // run deliberately started without GPS
 
 // Switchable workout pages and local lap state. Page changes only redraw
 // existing layers; they do not alter sensor or radio cadence.
@@ -633,7 +645,62 @@ static void prv_render_page(void) {
   prv_check_target();
 }
 
+/* Recording (or auto-paused, which still means moving) while the phone is
+ * absent or GPS is stale. While disconnected the watch cannot know the GPS
+ * state, so a missing phone alone counts. */
+static bool prv_track_at_risk(void) {
+  bool recording = s_state == STATE_RUNNING ||
+                   (s_state == STATE_PAUSED && s_autopaused);
+  return recording && !s_track_alert_muted && (!s_phone_connected || !s_gps_ok);
+}
+
+static void prv_track_alert_fire(void *data);
+
+static void prv_track_alert_arm(uint32_t delay_s) {
+  if (s_track_alert_timer) app_timer_cancel(s_track_alert_timer);
+  s_track_alert_timer = app_timer_register(delay_s * 1000, prv_track_alert_fire, NULL);
+}
+
+/* Three long, three short, three long: distinct from split counts and HR/pace
+ * target reminders. 5.45 s, inside Pebble's ten-second pattern limit. */
+static void prv_track_alert_fire(void *data) {
+  (void)data;
+  s_track_alert_timer = NULL;
+  if (!prv_track_at_risk() || s_track_alert_sent) return;
+  time_t at = time(NULL);
+  if (s_track_alert_last && at < s_track_alert_last + TRACK_ALERT_GAP_S) {
+    prv_track_alert_arm((uint32_t)(s_track_alert_last + TRACK_ALERT_GAP_S - at));
+    return;
+  }
+  static const uint32_t pattern[] = {
+    500, 200, 500, 200, 500, 400,
+    150, 200, 150, 200, 150, 400,
+    500, 200, 500, 200, 500,
+  };
+  vibes_enqueue_custom_pattern((VibePattern){
+    .durations = pattern, .num_segments = ARRAY_LENGTH(pattern) });
+  light_enable_interaction();
+  APP_LOG(APP_LOG_LEVEL_INFO, "route alert: phone %d gps %d", s_phone_connected, s_gps_ok);
+  s_track_alert_sent = true;
+  s_track_alert_last = at;
+}
+
+/* Called from every state-text refresh, which already follows each change of
+ * run state, phone connection and GPS status. */
+static void prv_update_track_alert(void) {
+  if (!prv_track_at_risk()) {
+    s_track_alert_sent = false;
+    if (s_track_alert_timer) {
+      app_timer_cancel(s_track_alert_timer);
+      s_track_alert_timer = NULL;
+    }
+    return;
+  }
+  if (!s_track_alert_timer && !s_track_alert_sent) prv_track_alert_arm(TRACK_ALERT_HOLD_S);
+}
+
 static void prv_set_state_text(void) {
+  prv_update_track_alert();
   if (s_state != STATE_RUNNING) split_alert_dismiss();
   // The big timer carries run state by COLOUR: black = recording, red =
   // paused, grey = idle/saving. The compact line under it names the current
@@ -1147,9 +1214,28 @@ static void prv_schedule_link_retry(void) {
   }
 }
 
+static bool prv_link_ready(void) {
+  return s_phone_connected && s_companion_ready;
+}
+
+/* Keep the start warning truthful. Once the phone app answers, close it with a
+ * short pulse; starting still takes a fresh, deliberate SELECT. */
+static void prv_start_gate_refresh(void) {
+  if (!start_gate_visible()) return;
+  if (prv_link_ready()) {
+    start_gate_hide();
+    vibes_short_pulse();
+  } else {
+    start_gate_set_phone_connected(s_phone_connected);
+  }
+}
+
 static void prv_connection_changed(bool connected) {
   if (s_phone_connected == connected) return;
   s_phone_connected = connected;
+  if (!connected) s_companion_ready = false;
+  APP_LOG(APP_LOG_LEVEL_INFO, "phone connection %d", connected);
+  prv_start_gate_refresh();
   prv_reset_link_retry();
   if (!connected) {
     // The compact watch journal and pending full-state command continue locally.
@@ -1502,6 +1588,10 @@ static void prv_inbox(DictionaryIterator *iter, void *context) {
   (void)context;
   // Any inbound packet proves that the complete phone round trip is alive.
   prv_reset_link_retry();
+  if (!s_companion_ready) {
+    s_companion_ready = true;
+    prv_start_gate_refresh();
+  }
   Tuple *t;
   bool saved = (dict_find(iter, MESSAGE_KEY_SAVED) != NULL);
   bool no_save = (dict_find(iter, MESSAGE_KEY_NOSAVE) != NULL);
@@ -1979,39 +2069,58 @@ static void prv_manual_pause_from_auto(void) {
   vibes_short_pulse();
 }
 
+/* Begin a fresh workout locally; the queued START reaches the phone whenever
+ * the link allows. without_gps mutes route alerts for treadmill-style runs. */
+static void prv_start_run(bool without_gps) {
+  s_track_alert_muted = without_gps;
+  s_track_alert_sent = false;
+  s_state = STATE_RUNNING;
+  s_accept_saved = true;
+  s_autopaused = false;
+  s_active_base_s = 0; s_elapsed_s = 0; s_dist_m = 0; s_pace_s = 0; s_steps = 0;
+  s_started_at = time(NULL);
+  s_run_anchor = s_started_at;
+  s_sid = prv_new_sid();
+  s_hr = 0; s_hr_ring_n = 0; s_hr_ring_i = 0;   // don't carry the previous run's HR into this one
+  s_hr_peak_raw = 0;
+  s_hr_raw_prev = 0;
+  s_hr_raw_prev_at = 0;
+  s_health_countdown_s = 0;                      // sample on the very next tick
+  s_egain_live_m = s_moving_live_s = s_avg_hr_live = 0;
+  s_page = 0;
+  s_lap_n = 1; s_lap_start_active_s = 0; s_lap_start_dist_m = 0;
+  s_target_bad_since = s_target_last_alert = 0;
+  s_target_complete_alerted = false;
+  s_journal_n = 0; s_journal_last_added_at = s_journal_last_sent_at = 0;
+  s_journal_overflow = false; s_journal_flush_pending = false;
+  g_stats.act = g_set.mode;                      // locked in now; the phone confirms it via MODE
+  s_steps_paused = 0;                            // and don't carry a paused-step offset
+  prv_begin_steps();                             // capture the boundary before the first step
+  prv_journal_add(false);
+  g_stats.trk_n = 0; g_stats.trk_span_m = 0; g_stats.pace_n = 0; g_stats.hr_n = 0;
+  prv_update_time(); prv_update_dist(); prv_update_pace(); prv_update_steps(); prv_update_hr();
+  prv_queue_cmd(CMD_START);
+  vibes_short_pulse();
+}
+
+static void prv_start_without_gps(void) {
+  if (s_state != STATE_READY && s_state != STATE_DONE) return;
+  prv_start_run(true);
+  prv_set_state_text();
+}
+
 static void prv_select_click(ClickRecognizerRef rec, void *ctx) {
   (void)rec; (void)ctx;
   if (!s_msg_ok) { prv_flash("PHONE LINK ERROR"); return; }
   switch (s_state) {
     case STATE_READY:
     case STATE_DONE:
-      s_state = STATE_RUNNING;
-      s_accept_saved = true;
-      s_autopaused = false;
-      s_active_base_s = 0; s_elapsed_s = 0; s_dist_m = 0; s_pace_s = 0; s_steps = 0;
-      s_started_at = time(NULL);
-      s_run_anchor = s_started_at;
-      s_sid = prv_new_sid();
-      s_hr = 0; s_hr_ring_n = 0; s_hr_ring_i = 0;   // don't carry the previous run's HR into this one
-      s_hr_peak_raw = 0;
-      s_hr_raw_prev = 0;
-      s_hr_raw_prev_at = 0;
-      s_health_countdown_s = 0;                      // sample on the very next tick
-      s_egain_live_m = s_moving_live_s = s_avg_hr_live = 0;
-      s_page = 0;
-      s_lap_n = 1; s_lap_start_active_s = 0; s_lap_start_dist_m = 0;
-      s_target_bad_since = s_target_last_alert = 0;
-      s_target_complete_alerted = false;
-      s_journal_n = 0; s_journal_last_added_at = s_journal_last_sent_at = 0;
-      s_journal_overflow = false; s_journal_flush_pending = false;
-      g_stats.act = g_set.mode;                      // locked in now; the phone confirms it via MODE
-      s_steps_paused = 0;                            // and don't carry a paused-step offset
-      prv_begin_steps();                             // capture the boundary before the first step
-      prv_journal_add(false);
-      g_stats.trk_n = 0; g_stats.trk_span_m = 0; g_stats.pace_n = 0; g_stats.hr_n = 0;
-      prv_update_time(); prv_update_dist(); prv_update_pace(); prv_update_steps(); prv_update_hr();
-      prv_queue_cmd(CMD_START);
-      vibes_short_pulse();
+      // GPS lives on the phone: never let a route go unrecorded silently.
+      if (!prv_link_ready()) {
+        start_gate_show(s_phone_connected, prv_start_without_gps);
+        return;
+      }
+      prv_start_run(false);
       break;
     case STATE_RUNNING:
       prv_refresh_steps();             // classify the final delta as running
@@ -2506,9 +2615,11 @@ static void prv_deinit(void) {
   if (s_flash_timer) app_timer_cancel(s_flash_timer);
   if (s_send_timer) app_timer_cancel(s_send_timer);
   if (s_pause_sample_timer) app_timer_cancel(s_pause_sample_timer);
+  if (s_track_alert_timer) app_timer_cancel(s_track_alert_timer);
   tick_timer_service_unsubscribe();
   connection_service_unsubscribe();
   summary_deinit();        // windows are freed here, not from their unload handlers
+  start_gate_deinit();
   settings_deinit();
   window_destroy(s_window);
   hintbar_unload_cache();  // free the shared icon bitmaps

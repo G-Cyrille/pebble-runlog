@@ -6,6 +6,15 @@ reloading the phone bundle.
 
 ## Unreleased
 
+- Block Start while the phone cannot record GPS. A full-screen warning
+  appears when the phone is disconnected or its companion has not answered;
+  BACK cancels, holding SELECT starts without GPS. The warning closes once
+  the phone app answers. **Watch binary.**
+
+- Vibrate (three long, three short, three long) after 30 seconds without GPS
+  or phone while recording. The workout never stops; one alert per outage,
+  at most every two minutes. **Watch binary.**
+
 - Add numbered split vibrations: one long pulse for five distance units and
   one short pulse for each remaining unit. A ten-second full-screen overlay
   shows the milestone, last split time and overall average in large type.
