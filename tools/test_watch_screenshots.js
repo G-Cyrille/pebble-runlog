@@ -11,7 +11,7 @@ var path = require('path');
 
 var out = process.argv[2] || '/tmp/runlog-watch-screenshots';
 var screens = [
-  'ready', 'settings', 'live', 'lap', 'totals', 'autopause',
+  'ready', 'settings', 'live', 'lap', 'totals', 'split', 'autopause',
   'route', 'stats', 'trends', 'actions'
 ];
 var platforms = {

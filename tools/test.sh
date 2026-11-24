@@ -18,8 +18,8 @@ assert.strictEqual(pkg.pebble.projectType, 'native',
 assert.deepStrictEqual(pkg.pebble.targetPlatforms, ['emery'], 'RunLog targets only Pebble Time 2');
 assert.strictEqual(pkg.pebble.sdkVersion, '3');
 assert.strictEqual(pkg.pebble.messageKeys[0], 'CMD');
-assert.strictEqual(pkg.pebble.messageKeys[pkg.pebble.messageKeys.length - 1], 'HRZONE');
-assert.strictEqual(pkg.pebble.messageKeys.length, 60, 'wire key order is append-only');
+assert.strictEqual(pkg.pebble.messageKeys[59], 'HRZONE', 'existing wire keys retain their ids');
+assert.deepStrictEqual(pkg.pebble.messageKeys.slice(60), ['SPLITT', 'SPLITAVG']);
 const resources = pkg.pebble.resources.media.map(item => item.name);
 ['ICON_SETTINGS', 'ICON_START', 'ICON_CONFIRM', 'ICON_DECLINE', 'ICON_PAUSE',
  'ICON_STOP', 'ICON_RUN', 'ICON_WALK', 'ICON_BIKE', 'ICON_HIKE', 'ICON_UP',

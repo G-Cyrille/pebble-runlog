@@ -56,6 +56,7 @@ typedef enum {
 // synthesise common symbols which can lead to unpredictable results.
 #include "runlog.h"
 #include "hintbar.h"
+#include "split_alert.h"
 
 // Define g_set with sensible defaults.  Kilometres and auto-pause
 // enabled mirrors the defaults used on the phone side.  Splits
@@ -178,6 +179,8 @@ static uint32_t s_link_retry_ms = LINK_RETRY_MIN_MS;
 // Switchable workout pages and local lap state. Page changes only redraw
 // existing layers; they do not alter sensor or radio cadence.
 static int s_page = 0;
+static uint32_t s_split_sid = 0;
+static int s_last_split_distance = 0;
 static int s_lap_n = 1;
 static int s_lap_start_active_s = 0;
 static int s_lap_start_dist_m = 0;
@@ -631,6 +634,7 @@ static void prv_render_page(void) {
 }
 
 static void prv_set_state_text(void) {
+  if (s_state != STATE_RUNNING) split_alert_dismiss();
   // The big timer carries run state by COLOUR: black = recording, red =
   // paused, grey = idle/saving. The compact line under it names the current
   // Pebble-style page unless a more important state needs the space.
@@ -1790,11 +1794,16 @@ static void prv_inbox(DictionaryIterator *iter, void *context) {
     prv_update_acc();
   }
   if ((t = dict_find(iter, MESSAGE_KEY_SPLIT))) {
-    vibes_double_pulse();
-    light_enable_interaction();
-    snprintf(s_flash_buf, sizeof(s_flash_buf), "%s %d",
-             g_set.miles ? "MI" : "KM", (int)t->value->int32);
-    prv_flash(s_flash_buf);
+    int distance = (int)t->value->int32;
+    Tuple *last = dict_find(iter, MESSAGE_KEY_SPLITT);
+    Tuple *average = dict_find(iter, MESSAGE_KEY_SPLITAVG);
+    if (s_state == STATE_RUNNING && g_set.splits && t_sid && incoming_sid == s_sid &&
+        distance > 0 && last && average &&
+        (s_split_sid != s_sid || distance > s_last_split_distance)) {
+      s_split_sid = s_sid;
+      s_last_split_distance = distance;
+      split_alert_show(distance, (int)last->value->int32, (int)average->value->int32);
+    }
   }
   if ((t = dict_find(iter, MESSAGE_KEY_AVGP))) {
     g_stats.avgp_s = (int)t->value->int32;
@@ -1951,6 +1960,7 @@ static void prv_inbox(DictionaryIterator *iter, void *context) {
 
 // ---------------- Buttons ----------------
 static void prv_change_page(int delta) {
+  split_alert_dismiss();
   s_page = (s_page + delta + WORKOUT_PAGE_COUNT) % WORKOUT_PAGE_COUNT;
   s_dist_buf[0] = s_pace_buf[0] = s_hr_buf[0] = s_steps_buf[0] = '\0';
   prv_set_state_text();
@@ -2081,6 +2091,7 @@ static void prv_down_long(ClickRecognizerRef rec, void *ctx) {
   s_lap_start_dist_m = s_dist_m;
   prv_session_persist();
   s_page = 1;
+  split_alert_dismiss();
   s_dist_buf[0] = s_pace_buf[0] = s_hr_buf[0] = s_steps_buf[0] = '\0';
   prv_set_state_text();
   prv_send_sample(true);
@@ -2090,6 +2101,7 @@ static void prv_down_long(ClickRecognizerRef rec, void *ctx) {
 }
 
 static void prv_back_click(ClickRecognizerRef rec, void *ctx) {
+  split_alert_dismiss();
   (void)rec; (void)ctx;
   if (s_state == STATE_RUNNING || s_state == STATE_PAUSED || s_state == STATE_SAVING) {
     prv_flash("HOLD SEL TO END");
@@ -2386,6 +2398,7 @@ static void prv_window_load(Window *window) {
   // right-edge action bar telling the side buttons' jobs
   s_actionbar = hintbar_create(GRect(CW, 0, ab_w, H));
   layer_add_child(root, s_actionbar);
+  split_alert_init(root);
 
   prv_set_state_text();
   prv_update_time();
@@ -2398,6 +2411,7 @@ static void prv_window_load(Window *window) {
 
 static void prv_window_unload(Window *window) {
   (void)window;
+  split_alert_deinit();
   text_layer_destroy(s_acc_layer);
   text_layer_destroy(s_state_layer);
   text_layer_destroy(s_clock_layer);

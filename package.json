@@ -84,7 +84,9 @@
       "ROUTE",
       "DQ",
       "CFGSET",
-      "HRZONE"
+      "HRZONE",
+      "SPLITT",
+      "SPLITAVG"
     ],
     "resources": {
       "media": [

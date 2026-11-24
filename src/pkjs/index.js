@@ -128,7 +128,7 @@ var ST = {
   hr: 0, hrAt: 0, cad: 0, cadAt: 0, lastSteps: null, stepHist: [], steps: 0,
   hrArea: 0, hrSecs: 0, hrPeak: 0, hrAgg: 0, hrAggAt: 0,
   stepAdj: 0, stepPrevRaw: null, lastRaw: null,
-  startAt: 0, splitN: 0, segFlag: 0,
+  startAt: 0, splitN: 0, splitMovS: 0, segFlag: 0,
   watchId: null, geoFrequency: 0, geoWatchdog: null,
   sending: false, queue: [], lastStatT: 0,
   lastOk: -1, lastAccSent: -1, lastAccAt: 0,
@@ -750,6 +750,7 @@ function onFix(pos) {
            ? null : Math.round(c.altitude * 10) / 10
   };
 
+  var distBefore = ST.dist, movingBefore = ST.movS;
   if (ST.last) {
     var dt = fix.t - ST.last.t;
     var dm = haversine(ST.last, fix);
@@ -782,10 +783,24 @@ function onFix(pos) {
   ST.last = fix;
 
   var mult = activityValue(C.SPLIT_MULT, ST.act);
-  var n = Math.floor(ST.dist / (unitM(WSET.mi) * mult));
+  var splitM = unitM(WSET.mi) * mult;
+  var n = Math.floor(ST.dist / splitM);
   if (n > ST.splitN) {
+    // Interpolate within this accepted GPS leg, excluding pauses and the
+    // overshoot beyond the milestone from both displayed times.
+    var secondsPerMetre = ST.dist > distBefore
+      ? (ST.movS - movingBefore) / (ST.dist - distBefore) : 0;
+    var boundaryMoving = ST.movS - (ST.dist - n * splitM) * secondsPerMetre;
+    var priorMoving = n > ST.splitN + 1
+      ? boundaryMoving - splitM * secondsPerMetre : ST.splitMovS;
+    if (WSET.splits) {
+      telemetry.SID = wireSid(ST.sid);
+      telemetry.SPLIT = n * mult;
+      telemetry.SPLITT = Math.round(Math.max(0, boundaryMoving - priorMoving));
+      telemetry.SPLITAVG = Math.round(boundaryMoving * 1000 / (n * splitM));
+    }
     ST.splitN = n;
-    if (WSET.splits) telemetry.SPLIT = n * mult;   // watch shows "KM 5", "KM 10"…
+    ST.splitMovS = boundaryMoving;
   }
 
   if (t - ST.lastStatT >= powerProfile(ST.act).statGap) {
@@ -900,7 +915,7 @@ function startRun(sid, startAt) {
   ST.last = null;
   ST.startAt = (startAt && isFinite(startAt) && startAt > 0 && startAt <= now() + 300000)
                  ? startAt : now();
-  ST.splitN = 0; ST.segFlag = 0;
+  ST.splitN = 0; ST.splitMovS = 0; ST.segFlag = 0;
   ST.lastT = 0; ST.lastTp = 0;
   ST.slowN = 0; ST.fastN = 0; ST.apVec = null;
   ST.eleSm = null; ST.eleBase = null; ST.egain = 0;
@@ -2054,7 +2069,7 @@ function ipChunkKey(sid, i) { return 'runlog.ip.' + sid + '.' + i; }
 function checkpointMeta() {
   return {
     version: 3, chunked: 1,
-    startAt: ST.startAt, dist: ST.dist, movS: ST.movS,
+    startAt: ST.startAt, dist: ST.dist, movS: ST.movS, splitMovS: ST.splitMovS,
     activeS: activeNow(), egain: ST.egain, steps: ST.steps,
     hrArea: ST.hrArea, hrSecs: ST.hrSecs, hrPeak: ST.hrPeak,
     act: ST.act, sid: ST.sid, cmdSeq: ST.lastCmdSeq, at: now(),
@@ -2212,6 +2227,14 @@ function restoreFromInprogress(ip) {
   else ST.stepAdj = 0;
   ST.stepHist = [];
   ST.splitN = Math.floor(ST.dist / (unitM(WSET.mi) * C.SPLIT_MULT[ST.act]));
+  ST.splitMovS = Number(ip.splitMovS);
+  if (!isFinite(ST.splitMovS) || ST.splitMovS < 0 || ST.splitMovS > ST.movS) {
+    var restoredSplits = computeSplits(storedPts, WSET.mi, C.SPLIT_MULT[ST.act]);
+    ST.splitMovS = 0;
+    for (var si = 0; si < ST.splitN && si < restoredSplits.length; si++)
+      ST.splitMovS += restoredSplits[si].s;
+    ST.splitMovS = Math.min(ST.movS, ST.splitMovS);
+  }
   ST.lastStatT = 0;
   ST.ipPersistedN = ST.pts.length;
   armIpHeartbeat();
@@ -2468,7 +2491,7 @@ function endurainUploadUrl(raw) {
   // API-docs URL without duplicating paths. Reverse-proxy subpaths are kept.
   var apiAt = u.search(/\/api\/v1(?:\/|$)/i);
   if (apiAt >= 0) u = u.slice(0, apiAt);
-  return u.replace(/\/+$/, '') + '/api/v1/activities/create/upload';
+  return u.replace(/\/+$/, '') + '/api/v1/activities/upload';
 }
 
 /* One place that knows how to talk to each destination.

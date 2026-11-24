@@ -289,6 +289,9 @@ function storedRuns(W) {
   var split = msgsWith(W, 'SPLIT');
   assert.strictEqual(split.length, 1, 'exactly one split alert');
   assert.strictEqual(split[0].SPLIT, 1, 'split #1');
+  assert(Math.abs(split[0].SPLITT - 300) <= 2, 'first kilometre takes five minutes');
+  assert(Math.abs(split[0].SPLITAVG - 300) <= 2, 'average pace is sampled at the split boundary');
+  assert(split[0].SID > 0, 'split notifications belong to the current session');
   assert(split[0].DIST !== undefined, 'split shares the fix telemetry packet');
 
   var per = lastWith(W, 'PACE');
@@ -504,6 +507,8 @@ function storedRuns(W) {
 
   var splits = msgsWith(W, 'SPLIT');
   assert.strictEqual(splits.length, 1, 'one mile split');
+  assert(Math.abs(splits[0].SPLITT - 483) <= 3, 'mile duration is already in seconds per mile');
+  assert(Math.abs(splits[0].SPLITAVG - 300) <= 2, 'average stays in seconds per km for watch formatting');
   var dAtSplit = null;
   for (var k = 0; k < W.msgs.length; k++) {
     if (W.msgs[k].SPLIT !== undefined) break;
@@ -1982,7 +1987,7 @@ function storedRuns(W) {
 
   var x = W.xhrs[W.xhrs.length - 1];
   assert.strictEqual(x.method, 'POST');
-  assert.strictEqual(x.url, 'https://endurain.home/runlog/api/v1/activities/create/upload');
+  assert.strictEqual(x.url, 'https://endurain.home/runlog/api/v1/activities/upload');
   assert.strictEqual(x.headers['X-API-Key'], 'endurain_upload_only_123');
   assert(!x.headers.Authorization && !x.headers['X-Client-Type'],
          'API-key upload needs neither bearer nor client-type headers');
@@ -1992,7 +1997,7 @@ function storedRuns(W) {
   assert(gpxMultipart.indexOf(Buffer.from('name="file"')) >= 0 &&
          gpxMultipart.indexOf(Buffer.from('<gpx ')) >= 0,
          'Endurain receives the selected activity file as multipart');
-  assert.strictEqual(x.timeout, 90000, 'synchronous Endurain import gets a long-file timeout');
+  assert.strictEqual(x.timeout, 90000, 'Endurain file uploads allow a long-file timeout');
   x.respond(202, '');
   assert.strictEqual(storedRuns(W)[0].up, 1, 'Endurain 202 is accepted as success');
   assert.strictEqual(storedRuns(W)[0].upMeta.dest, 'endurain', 'destination recorded');
@@ -2679,6 +2684,60 @@ function storedRuns(W) {
   assert(snap.DIST > 0 && snap.LAPD === snap.DIST && snap.GPSOK === 1 && snap.ACC === 7,
          'refresh snapshot values describe the current filtered workout');
   console.log('scenario 39 (screen-tap coherent live-stat refresh) OK');
+})();
+
+/* Split times use the moving clock, not wall-clock pauses or GPS overshoot. */
+(function scenario40() {
+  var W = makeWorld(); W.boot(); W.fire('ready', {});
+  var t0 = 1752000000;
+  W.clockMs = t0 * 1000;
+  W.fire('appmessage', { payload: { UNITS: 0, AUTOP: 0, SPLITP: 1 } });
+  W.fire('appmessage', { payload: { CMD: 1 } });
+  var w = makeWalker(W, t0, -31.95, 115.85);
+  var i;
+  for (i = 0; i < 68; i++) w.step(10 / 3, 5, 20);
+  var first = lastWith(W, 'SPLIT');
+  assert(first && first.SPLIT === 1);
+  W.fire('appmessage', { payload: { CMD: 2 } });
+  for (i = 0; i < 60; i++) w.step(0, 5, 20);
+  assert.strictEqual(msgsWith(W, 'SPLIT').length, 1, 'no splits during a five-minute pause');
+  W.fire('appmessage', { payload: { CMD: 3 } });
+  for (i = 0; i < 100; i++) w.step(2.5, 5, 20);
+  var second = lastWith(W, 'SPLIT');
+  assert.strictEqual(second.SPLIT, 2);
+  assert(second.SPLITT >= 370 && second.SPLITT <= 410,
+         'slower second km excludes the five-minute pause: ' + second.SPLITT);
+  assert(Math.abs(second.SPLITAVG * 2 - first.SPLITT - second.SPLITT) <= 2,
+         'overall average uses the two completed kilometres, not the overshoot');
+  console.log('scenario 40 (interpolated split and average, excluding pauses) OK');
+})();
+
+(function scenario41() {
+  [false, true].forEach(function (legacy) {
+    var W = makeWorld(); W.boot(); W.fire('ready', {});
+    var t0 = 1752100000;
+    W.clockMs = t0 * 1000;
+    W.fire('appmessage', { payload: { UNITS: 0, AUTOP: 0, SPLITP: 1 } });
+    W.fire('appmessage', { payload: { CMD: 1 } });
+    var w = makeWalker(W, t0, -31.95, 115.85);
+    for (var i = 0; i < 90; i++) w.step(10 / 3, 5, 20);
+    var cp = JSON.parse(W.store['runlog.inprogress']);
+    assert(cp.splitMovS >= 298 && cp.splitMovS <= 302, 'last boundary survives checkpoints');
+    if (legacy) {
+      delete cp.splitMovS;
+      W.store['runlog.inprogress'] = JSON.stringify(cp);
+    }
+    var next = makeWorld(); next.store = W.store; next.clockMs = cp.at;
+    next.boot(); next.fire('ready', {});
+    var resumed = makeWalker(next, cp.at / 1000, -31.96, 115.86);
+    for (i = 0; i < 60; i++) resumed.step(10 / 3, 5, 20);
+    var split = lastWith(next, 'SPLIT');
+    assert(split && split.SPLIT === 2, 'restart does not repeat the first kilometre');
+    assert(Math.abs(split.SPLITT - 300) <= 3,
+           'second kilometre keeps its own duration after restart, legacy=' + legacy + ': ' + split.SPLITT);
+    assert(Math.abs(split.SPLITAVG - 300) <= 3);
+  });
+  console.log('scenario 41 (split clock recovery, including older checkpoints) OK');
 })();
 
 console.log('\nALL PIPELINE TESTS PASSED');

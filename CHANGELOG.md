@@ -4,6 +4,19 @@ All notable changes to RunLog. Dates are approximate. Versions that change the
 **watch binary** are marked — those require re-flashing the watch, not just
 reloading the phone bundle.
 
+## Unreleased
+
+- Add numbered split vibrations: one long pulse for five distance units and
+  one short pulse for each remaining unit. A ten-second full-screen overlay
+  shows the milestone, last split time and overall average in large type.
+  Split times use boundary interpolation on the moving clock, survive phone
+  restarts and exclude pauses. Duplicate packets do not repeat the alert.
+  Reinstall the complete PBW to update both watch and companion.
+
+- Fix Endurain uploads for 0.20.2 by using `/api/v1/activities/upload`.
+  The previous `/api/v1/activities/create/upload` path returns HTTP 405.
+  Reinstall the complete PBW to update the phone companion.
+
 ## 2.2.0 — Emery-native runtime, essential settings and steadier tracking
 
 - The watch package now targets only **Emery / Pebble Time 2** and uses the

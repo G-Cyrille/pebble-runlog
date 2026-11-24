@@ -179,6 +179,11 @@ exercise_platform() {
   pebble emu-button --emulator "$platform" --vnc click down
   capture "$platform" totals
   pebble send-app-message --emulator "$platform" --vnc --int \
+    10031="$SESSION_SID" 10012=3 10060=342 10061=358 >/dev/null
+  capture "$platform" split
+  pebble emu-button --emulator "$platform" --vnc click up
+  pebble emu-button --emulator "$platform" --vnc click down
+  pebble send-app-message --emulator "$platform" --vnc --int \
     10030=3 10031="$SESSION_SID" 10034=2 10035=755 10019=1 >/dev/null
   capture "$platform" autopause
 
